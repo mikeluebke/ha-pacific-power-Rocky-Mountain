@@ -1,0 +1,13 @@
+{
+  "domain": "pacific_power",
+  "name": "Pacific Power",
+  "version": "0.1.0",
+  "codeowners": ["@nkcx"],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/nkcx/pacific-power-green-button",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/nkcx/pacific-power-green-button/issues",
+  "requirements": []
+}

@@ -1,0 +1,59 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to Pacific Power. Please try again later.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "An unexpected error occurred."
+    },
+    "step": {
+      "user": {
+        "title": "Pacific Power Login",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        },
+        "data_description": {
+          "username": "Your Pacific Power account email address",
+          "password": "Your Pacific Power account password"
+        }
+      },
+      "select_account": {
+        "title": "Select Account",
+        "data": {
+          "account": "Service Address"
+        }
+      },
+      "manual_account": {
+        "title": "Account Details",
+        "description": "Account details could not be discovered automatically. You can find these values in your browser's developer tools on the Pacific Power energy usage page.",
+        "data": {
+          "customer_idn": "Customer ID Number",
+          "account_sequence": "Account Sequence",
+          "agreement_sequence": "Agreement Sequence",
+          "service_address": "Service Address"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with Pacific Power",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_data_received": {
+        "name": "Last data received"
+      },
+      "last_updated": {
+        "name": "Last updated"
+      }
+    }
+  }
+}
