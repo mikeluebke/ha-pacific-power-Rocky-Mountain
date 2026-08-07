@@ -1,7 +1,6 @@
 {
   "domain": "pacific_power",
   "name": "Pacific Power",
-  "version": "0.1.0",
   "codeowners": ["@nkcx"],
   "config_flow": true,
   "dependencies": ["recorder"],
@@ -9,5 +8,6 @@
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/nkcx/ha-pacific-power/issues",
-  "requirements": ["cryptography>=43.0.0"]
+  "requirements": ["cryptography>=43.0.0"],
+  "version": "0.1.0"
 }
