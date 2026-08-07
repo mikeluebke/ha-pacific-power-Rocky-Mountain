@@ -1,34 +1,62 @@
-"""Pacific Power API client for Azure AD B2C authentication and Green Button data."""
+"""Pacific Power API client using Playwright for browser automation.
+
+The Pacific Power portal encrypts API request bodies and signs them with
+a session-derived key (X-WCSSS-Content-Signature header). Rather than
+reverse-engineering the crypto from minified Angular JS, we use a headless
+browser to execute the portal's own JavaScript.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime
 
-import aiohttp
-
-from .const import (
-    BASE_URL,
-    B2C_CLIENT_ID,
-    B2C_LOGIN_URL,
-    B2C_POLICY,
-    GREEN_BUTTON_PATH,
-    OAUTH_INIT_PATH,
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    async_playwright,
 )
+
+from .const import BASE_URL
 
 _LOGGER = logging.getLogger(__name__)
 
-SETTINGS_RE = re.compile(r"var\s+SETTINGS\s*=\s*(\{.*?\})\s*;", re.DOTALL)
-CSRF_META_RE = re.compile(
-    r'<meta\s+name=["\']_csrf["\']\s+content=["\']([^"\']+)["\']', re.IGNORECASE
-)
-CSRF_INPUT_RE = re.compile(
-    r'<input[^>]+name=["\']_csrf["\']\s+value=["\']([^"\']+)["\']', re.IGNORECASE
-)
-XSRF_COOKIE = "XSRF-TOKEN"
+LOGIN_TIMEOUT = 60000
+NAV_TIMEOUT = 30000
+API_TIMEOUT = 60000
+
+GREEN_BUTTON_JS = """
+async ({customerIDN, accountSequence, agreementSequence, startDate, endDate, numberOfMonths, graphWindow, address}) => {
+    const body = {
+        getGreenButtonDataRequestBody: {
+            agreement: { customerIDN, accountSequence, agreementSequence },
+            dateRange: { startDate, endDate, numberOfMonths: String(numberOfMonths) },
+            graphDetails: { graphWindow, address }
+        }
+    };
+    const response = await fetch("/api/energy-usage/getGreenButtonData", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json, text/plain, */*" },
+        credentials: "same-origin",
+        body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+        return { error: `HTTP ${response.status}`, status: response.status };
+    }
+    const data = await response.json();
+    if (data.getGreenButtonDataResponseBody) {
+        return { xml: data.getGreenButtonDataResponseBody.xmlPayload || JSON.stringify(data) };
+    }
+    const text = JSON.stringify(data);
+    if (text.includes("IntervalReading")) {
+        return { xml: text };
+    }
+    return { error: "Unexpected response format", body: text.substring(0, 500) };
+}
+"""
 
 
 class PacificPowerApiError(Exception):
@@ -54,204 +82,110 @@ class AccountInfo:
 
 
 class PacificPowerApi:
-    """Client for Pacific Power's portal."""
+    """Client for Pacific Power's portal using Playwright browser automation."""
 
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        username: str,
-        password: str,
-    ) -> None:
-        self._session = session
+    def __init__(self, username: str, password: str) -> None:
         self._username = username
         self._password = password
-        self._csrf_token: str | None = None
+        self._playwright = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
 
-    async def async_login(self) -> None:
-        """Authenticate via Azure AD B2C and establish a session."""
+    async def async_start(self) -> None:
+        """Launch the browser."""
         try:
-            b2c_html = await self._initiate_oauth()
-            settings = self._extract_settings(b2c_html)
-            await self._submit_credentials(settings)
-            await self._confirm_signin(settings)
-        except PacificPowerApiError:
-            raise
-        except aiohttp.ClientError as err:
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(headless=True)
+        except Exception as err:
             raise PacificPowerConnectionError(
-                "Failed to connect to Pacific Power"
+                f"Failed to launch browser: {err}"
             ) from err
 
-    async def _initiate_oauth(self) -> str:
-        """Start the OAuth flow and return the B2C login page HTML."""
-        url = f"{BASE_URL}{OAUTH_INIT_PATH}"
-        async with self._session.get(
-            url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=30)
-        ) as resp:
-            if resp.status != 200:
-                raise PacificPowerConnectionError(
-                    f"OAuth initiation returned status {resp.status}"
-                )
-            return await resp.text()
+    async def async_stop(self) -> None:
+        """Close the browser and clean up."""
+        if self._page:
+            try:
+                await self._page.close()
+            except Exception:
+                pass
+            self._page = None
+        if self._context:
+            try:
+                await self._context.close()
+            except Exception:
+                pass
+            self._context = None
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
 
-    def _extract_settings(self, html: str) -> dict:
-        """Extract the SETTINGS object from the B2C login page."""
-        match = SETTINGS_RE.search(html)
-        if not match:
+    async def async_login(self) -> None:
+        """Log in to the Pacific Power portal via the browser."""
+        if not self._browser:
+            await self.async_start()
+
+        self._context = await self._browser.new_context()
+        self._page = await self._context.new_page()
+
+        try:
+            await self._page.goto(
+                f"{BASE_URL}/secure/my-account/energy-usage",
+                wait_until="networkidle",
+                timeout=LOGIN_TIMEOUT,
+            )
+        except Exception as err:
+            raise PacificPowerConnectionError(
+                "Failed to load Pacific Power portal"
+            ) from err
+
+        if "login.csapps.pacificpower.net" in self._page.url:
+            await self._handle_b2c_login()
+        elif "/idm/login" in self._page.url:
+            raise PacificPowerAuthError("Unexpected login page format")
+
+    async def _handle_b2c_login(self) -> None:
+        """Fill and submit the Azure AD B2C login form."""
+        page = self._page
+        assert page is not None
+
+        try:
+            await page.wait_for_selector("#signInName", timeout=NAV_TIMEOUT)
+        except Exception as err:
             raise PacificPowerAuthError(
-                "Could not find SETTINGS on login page — portal may have changed"
-            )
-        raw = match.group(1)
-        raw = re.sub(r",\s*}", "}", raw)
-        raw = re.sub(r",\s*]", "]", raw)
+                "Login form did not load"
+            ) from err
+
+        await page.fill("#signInName", self._username)
+        await page.fill("#password", self._password)
+        await page.click("#next")
+
         try:
-            settings = json.loads(raw)
-        except json.JSONDecodeError:
-            trans_id = re.search(r'"transId"\s*:\s*"([^"]+)"', raw)
-            csrf = re.search(r'"csrf"\s*:\s*"([^"]+)"', raw)
-            if not trans_id or not csrf:
-                raise PacificPowerAuthError(
-                    "Could not parse SETTINGS from login page"
-                )
-            settings = {"transId": trans_id.group(1), "csrf": csrf.group(1)}
-        if "transId" not in settings or "csrf" not in settings:
-            raise PacificPowerAuthError("SETTINGS missing transId or csrf")
-        return settings
-
-    async def _submit_credentials(self, settings: dict) -> None:
-        """POST credentials to the B2C SelfAsserted endpoint."""
-        trans_id = settings["transId"]
-        csrf = settings["csrf"]
-        url = (
-            f"{B2C_LOGIN_URL}/{B2C_POLICY.lower()}/SelfAsserted"
-            f"?tx={trans_id}&p={B2C_POLICY}"
-        )
-        data = {
-            "request_type": "RESPONSE",
-            "signInName": self._username,
-            "password": self._password,
-        }
-        headers = {
-            "X-CSRF-TOKEN": csrf,
-            "X-Requested-With": "XMLHttpRequest",
-        }
-        async with self._session.post(
-            url,
-            data=data,
-            headers=headers,
-            allow_redirects=False,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            body = await resp.text()
-            if resp.status == 200 and '"status":"200"' in body:
-                return
-            if "INVALID_CREDENTIALS" in body or resp.status == 401:
-                raise PacificPowerAuthError("Invalid username or password")
-            if resp.status != 200:
-                raise PacificPowerAuthError(
-                    f"Credential submission returned status {resp.status}"
-                )
-            raise PacificPowerAuthError("Unexpected response during credential submission")
-
-    async def _confirm_signin(self, settings: dict) -> None:
-        """Confirm the B2C sign-in and follow redirects to establish session."""
-        trans_id = settings["transId"]
-        csrf = settings["csrf"]
-        url = (
-            f"{B2C_LOGIN_URL}/{B2C_POLICY.lower()}"
-            f"/api/CombinedSigninAndSignup/confirmed"
-            f"?csrf_token={csrf}&tx={trans_id}&p={B2C_POLICY}"
-        )
-        async with self._session.get(
-            url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=30)
-        ) as resp:
-            if resp.status != 200:
-                raise PacificPowerAuthError(
-                    f"Sign-in confirmation returned status {resp.status}"
-                )
-            self._extract_csrf_from_cookies()
-
-    def _extract_csrf_from_cookies(self) -> None:
-        """Extract CSRF token from session cookies."""
-        for cookie in self._session.cookie_jar:
-            if cookie.key == XSRF_COOKIE:
-                self._csrf_token = cookie.value
-                return
-        _LOGGER.debug("XSRF-TOKEN cookie not found, will try page extraction")
-
-    async def _ensure_csrf(self) -> str:
-        """Ensure we have a CSRF token, fetching from portal page if needed."""
-        if self._csrf_token:
-            return self._csrf_token
-
-        async with self._session.get(
-            f"{BASE_URL}/secure/my-account/dashboard",
-            allow_redirects=True,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            html = await resp.text()
-
-        match = CSRF_META_RE.search(html) or CSRF_INPUT_RE.search(html)
-        if match:
-            self._csrf_token = match.group(1)
-            return self._csrf_token
-
-        self._extract_csrf_from_cookies()
-        if self._csrf_token:
-            return self._csrf_token
-
-        raise PacificPowerApiError("Could not obtain CSRF token")
-
-    async def async_get_accounts(self) -> list[AccountInfo]:
-        """Discover account information from the energy usage page."""
-        try:
-            async with self._session.get(
-                f"{BASE_URL}/secure/energy-usage",
-                allow_redirects=True,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.debug("Energy usage page returned status %s", resp.status)
-                    return []
-                html = await resp.text()
-
-            return self._parse_accounts(html)
-        except aiohttp.ClientError:
-            _LOGGER.debug("Failed to fetch energy usage page for account discovery")
-            return []
-
-    def _parse_accounts(self, html: str) -> list[AccountInfo]:
-        """Extract account details from the energy usage page HTML."""
-        accounts: list[AccountInfo] = []
-
-        customer_idn_match = re.search(
-            r'customerIDN["\']?\s*[:=]\s*["\']?(\d+)', html
-        )
-        account_seq_match = re.search(
-            r'accountSequence["\']?\s*[:=]\s*["\']?(\d+)', html
-        )
-        agreement_seq_match = re.search(
-            r'agreementSequence["\']?\s*[:=]\s*["\']?(\d+)', html
-        )
-        address_match = re.search(
-            r'address["\']?\s*[:=]\s*["\']([^"\']+)["\']', html
-        )
-
-        if customer_idn_match and account_seq_match:
-            accounts.append(
-                AccountInfo(
-                    customer_idn=customer_idn_match.group(1),
-                    account_sequence=account_seq_match.group(1),
-                    agreement_sequence=(
-                        agreement_seq_match.group(1) if agreement_seq_match else "1"
-                    ),
-                    address=address_match.group(1) if address_match else "Unknown",
-                )
+            await page.wait_for_url(
+                f"{BASE_URL}/**", timeout=LOGIN_TIMEOUT
             )
+        except Exception:
+            current = page.url
+            if "login.csapps.pacificpower.net" in current:
+                error_el = await page.query_selector(".error, .errorMessage, #errorMessage")
+                if error_el:
+                    error_text = await error_el.text_content()
+                    raise PacificPowerAuthError(
+                        f"Login failed: {error_text}"
+                    )
+                raise PacificPowerAuthError("Login failed — credentials may be invalid")
+            raise PacificPowerConnectionError("Login timed out")
 
-        if not accounts:
-            _LOGGER.debug("Could not auto-discover account details from page")
-
-        return accounts
+        await page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT)
 
     async def async_get_green_button_data(
         self,
@@ -260,62 +194,64 @@ class PacificPowerApi:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
     ) -> str:
-        """Download Green Button XML data for an account."""
-        csrf = await self._ensure_csrf()
+        """Download Green Button XML data via the portal's Angular app."""
+        page = self._page
+        if not page:
+            raise PacificPowerApiError("Not logged in")
 
         now = datetime.now()
         if end_date is None:
             end_date = now
         if start_date is None:
-            start_date = now.replace(
-                year=now.year - (months // 12),
-                month=max(1, now.month - (months % 12)),
-            )
+            from dateutil.relativedelta import relativedelta
+            start_date = now - relativedelta(months=months)
 
-        form_data = {
-            "numberOfMonths": str(months),
+        params = {
             "customerIDN": account.customer_idn,
             "accountSequence": account.account_sequence,
             "agreementSequence": account.agreement_sequence,
-            "address": account.address,
-            "graphWindow": "daily",
             "startDate": start_date.strftime("%m/%d/%Y"),
             "endDate": end_date.strftime("%m/%d/%Y"),
-            "filename": f"PacificPower_GreenButton_{now.strftime('%m%d%Y')}.xml",
-            "_csrf": csrf,
+            "numberOfMonths": str(months),
+            "graphWindow": "daily",
+            "address": account.address,
         }
 
+        if "/secure/" not in page.url:
+            try:
+                await page.goto(
+                    f"{BASE_URL}/secure/my-account/energy-usage",
+                    wait_until="networkidle",
+                    timeout=NAV_TIMEOUT,
+                )
+            except Exception as err:
+                raise PacificPowerConnectionError(
+                    "Failed to navigate to energy usage page"
+                ) from err
+
         try:
-            async with self._session.post(
-                f"{BASE_URL}{GREEN_BUTTON_PATH}",
-                data=form_data,
-                allow_redirects=True,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    raise PacificPowerApiError(
-                        f"Green Button download returned status {resp.status}"
-                    )
-                body = await resp.text()
-        except aiohttp.ClientError as err:
-            raise PacificPowerConnectionError(
-                "Failed to download Green Button data"
+            result = await page.evaluate(GREEN_BUTTON_JS, params)
+        except Exception as err:
+            raise PacificPowerApiError(
+                f"Green Button API call failed: {err}"
             ) from err
 
-        if not body or not body.strip():
-            raise PacificPowerApiError("Green Button download returned empty response")
+        if not result:
+            raise PacificPowerApiError("Green Button API returned empty result")
 
-        if body.strip().startswith("<?xml") or body.strip().startswith("<feed"):
-            return body
+        if "error" in result:
+            status = result.get("status", "")
+            if status == 401:
+                raise PacificPowerAuthError("Session expired during data fetch")
+            raise PacificPowerApiError(
+                f"Green Button API error: {result['error']}"
+            )
 
-        try:
-            payload = json.loads(body)
-            if "xmlPayload" in payload:
-                return payload["xmlPayload"]
-        except (json.JSONDecodeError, KeyError):
-            pass
+        xml = result.get("xml", "")
+        if not xml:
+            raise PacificPowerApiError("Green Button response contained no XML data")
 
-        if "<" in body and "IntervalReading" in body:
-            return body
+        if not ("IntervalReading" in xml or "<?xml" in xml or "<feed" in xml):
+            raise PacificPowerApiError("Response does not contain valid Green Button XML")
 
-        raise PacificPowerApiError("Unexpected response format from Green Button download")
+        return xml

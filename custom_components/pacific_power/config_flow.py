@@ -5,11 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .api import (
     PacificPowerApi,
@@ -33,11 +31,12 @@ CREDENTIALS_SCHEMA = vol.Schema(
     }
 )
 
-MANUAL_ACCOUNT_SCHEMA = vol.Schema(
+CONF_ACCOUNT_NUMBER = "account_number"
+
+ACCOUNT_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_CUSTOMER_IDN): str,
-        vol.Required(CONF_ACCOUNT_SEQUENCE, default="1"): str,
-        vol.Required(CONF_AGREEMENT_SEQUENCE, default="1"): str,
+        vol.Required(CONF_ACCOUNT_NUMBER): str,
+        vol.Required(CONF_AGREEMENT_SEQUENCE, default="001"): str,
         vol.Required(CONF_SERVICE_ADDRESS): str,
     }
 )
@@ -64,13 +63,10 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             self._username = user_input[CONF_USERNAME]
             self._password = user_input[CONF_PASSWORD]
 
-            session = async_create_clientsession(
-                self.hass,
-                cookie_jar=aiohttp.CookieJar(unsafe=True),
-            )
-            api = PacificPowerApi(session, self._username, self._password)
+            api = PacificPowerApi(self._username, self._password)
 
             try:
+                await api.async_start()
                 await api.async_login()
             except PacificPowerAuthError:
                 errors["base"] = "invalid_auth"
@@ -80,40 +76,9 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected error during login")
                 errors["base"] = "unknown"
             else:
-                accounts = await api.async_get_accounts()
-                if len(accounts) == 1:
-                    account = accounts[0]
-                    unique_id = (
-                        f"{account.customer_idn}_{account.account_sequence}"
-                    )
-                    await self.async_set_unique_id(unique_id)
-                    self._abort_if_unique_id_configured()
-
-                    return self.async_create_entry(
-                        title=f"Pacific Power ({account.address})",
-                        data={
-                            CONF_USERNAME: self._username,
-                            CONF_PASSWORD: self._password,
-                            CONF_CUSTOMER_IDN: account.customer_idn,
-                            CONF_ACCOUNT_SEQUENCE: account.account_sequence,
-                            CONF_AGREEMENT_SEQUENCE: account.agreement_sequence,
-                            CONF_SERVICE_ADDRESS: account.address,
-                        },
-                    )
-
-                if len(accounts) > 1:
-                    self._accounts = [
-                        {
-                            CONF_CUSTOMER_IDN: a.customer_idn,
-                            CONF_ACCOUNT_SEQUENCE: a.account_sequence,
-                            CONF_AGREEMENT_SEQUENCE: a.agreement_sequence,
-                            CONF_SERVICE_ADDRESS: a.address,
-                        }
-                        for a in accounts
-                    ]
-                    return await self.async_step_select_account()
-
-                return await self.async_step_manual_account()
+                return await self.async_step_account()
+            finally:
+                await api.async_stop()
 
         return self.async_show_form(
             step_id="user",
@@ -121,47 +86,21 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_select_account(
+    async def async_step_account(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle account selection for multi-account users."""
+        """Handle account details entry."""
         if user_input is not None:
-            selected = user_input["account"]
-            for account in self._accounts:
-                if account[CONF_SERVICE_ADDRESS] == selected:
-                    unique_id = (
-                        f"{account[CONF_CUSTOMER_IDN]}"
-                        f"_{account[CONF_ACCOUNT_SEQUENCE]}"
-                    )
-                    await self.async_set_unique_id(unique_id)
-                    self._abort_if_unique_id_configured()
+            account_number = user_input[CONF_ACCOUNT_NUMBER].strip()
+            if "-" in account_number:
+                parts = account_number.split("-", 1)
+                customer_idn = parts[0]
+                account_seq = parts[1]
+            else:
+                customer_idn = account_number[:8]
+                account_seq = account_number[8:] or "001"
 
-                    return self.async_create_entry(
-                        title=f"Pacific Power ({account[CONF_SERVICE_ADDRESS]})",
-                        data={
-                            CONF_USERNAME: self._username,
-                            CONF_PASSWORD: self._password,
-                            **account,
-                        },
-                    )
-
-        addresses = [a[CONF_SERVICE_ADDRESS] for a in self._accounts]
-        return self.async_show_form(
-            step_id="select_account",
-            data_schema=vol.Schema(
-                {vol.Required("account"): vol.In(addresses)}
-            ),
-        )
-
-    async def async_step_manual_account(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle manual account entry when auto-discovery fails."""
-        if user_input is not None:
-            unique_id = (
-                f"{user_input[CONF_CUSTOMER_IDN]}"
-                f"_{user_input[CONF_ACCOUNT_SEQUENCE]}"
-            )
+            unique_id = f"{customer_idn}_{account_seq}"
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
 
@@ -170,13 +109,16 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 data={
                     CONF_USERNAME: self._username,
                     CONF_PASSWORD: self._password,
-                    **user_input,
+                    CONF_CUSTOMER_IDN: customer_idn,
+                    CONF_ACCOUNT_SEQUENCE: account_seq,
+                    CONF_AGREEMENT_SEQUENCE: user_input[CONF_AGREEMENT_SEQUENCE],
+                    CONF_SERVICE_ADDRESS: user_input[CONF_SERVICE_ADDRESS],
                 },
             )
 
         return self.async_show_form(
-            step_id="manual_account",
-            data_schema=MANUAL_ACCOUNT_SCHEMA,
+            step_id="account",
+            data_schema=ACCOUNT_SCHEMA,
         )
 
     async def async_step_reauth(
@@ -192,17 +134,13 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            session = async_create_clientsession(
-                self.hass,
-                cookie_jar=aiohttp.CookieJar(unsafe=True),
-            )
             api = PacificPowerApi(
-                session,
                 user_input[CONF_USERNAME],
                 user_input[CONF_PASSWORD],
             )
 
             try:
+                await api.async_start()
                 await api.async_login()
             except PacificPowerAuthError:
                 errors["base"] = "invalid_auth"
@@ -226,6 +164,8 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                     await self.hass.config_entries.async_reload(entry.entry_id)
                     return self.async_abort(reason="reauth_successful")
+            finally:
+                await api.async_stop()
 
         return self.async_show_form(
             step_id="reauth_confirm",

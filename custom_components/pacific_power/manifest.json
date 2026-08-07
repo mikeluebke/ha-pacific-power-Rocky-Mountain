@@ -9,5 +9,5 @@
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/nkcx/pacific-power-green-button/issues",
-  "requirements": []
+  "requirements": ["playwright==1.62.0", "python-dateutil==2.9.0"]
 }

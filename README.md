@@ -4,12 +4,27 @@ A [Home Assistant](https://www.home-assistant.io/) custom integration that impor
 
 ## Features
 
-- Authenticates with your Pacific Power account
+- Authenticates with your Pacific Power account via headless browser
 - Downloads Green Button (ESPI XML) energy usage data
 - Inserts historical consumption data into Home Assistant's long-term statistics
 - Works with the HA Energy Dashboard for tracking electricity usage
 - Supports forward (consumption) and reverse (solar export) flow directions
 - Refreshes automatically every 12 hours
+
+## Prerequisites
+
+This integration uses [Playwright](https://playwright.dev/python/) to automate the Pacific Power portal. Chromium must be installed on your system.
+
+### Home Assistant Container / Supervised / Core
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+### Home Assistant OS
+
+HA OS does not support installing system-level browser binaries. You will need to run Chromium via a companion Docker container or addon. (Addon coming soon.)
 
 ## Installation
 
@@ -31,7 +46,7 @@ A [Home Assistant](https://www.home-assistant.io/) custom integration that impor
 1. Go to **Settings** → **Devices & Services** → **Add Integration**
 2. Search for **Pacific Power**
 3. Enter your Pacific Power account email and password
-4. The integration will auto-discover your account details
+4. Enter your account number (format: `XXXXXXXX-XXX`, found on your bill) and service address
 
 ## Energy Dashboard
 
@@ -44,20 +59,22 @@ After the first data fetch (may take a few minutes after setup):
 
 ## How It Works
 
-Pacific Power provides energy usage data via the [Green Button](https://www.energy.gov/data/green-button) standard (ESPI XML format). This integration:
+Pacific Power's portal encrypts API requests using client-side JavaScript. This integration uses a headless Chromium browser via Playwright to execute the portal's own code, handling authentication and encryption transparently.
 
-1. Logs into your Pacific Power account via their web portal
-2. Downloads your Green Button usage data (daily kWh readings)
-3. Parses the ESPI XML and converts readings to kWh
-4. Inserts the data as external statistics in Home Assistant's recorder
+The flow:
+1. Opens a headless browser and navigates to the Pacific Power portal
+2. Fills in your credentials and logs in via Azure AD B2C
+3. Executes the portal's JavaScript to make an authenticated, encrypted API call
+4. Receives the Green Button (ESPI XML) response
+5. Parses the XML and inserts energy data as external statistics in Home Assistant
 
-Data is typically available with a 24-48 hour delay from Pacific Power.
+Data is typically available from Pacific Power with a 24-48 hour delay.
 
 ## Troubleshooting
 
-- **Authentication errors**: Verify your Pacific Power credentials at [pacificpower.net](https://www.pacificpower.net/). The integration does not support MFA-enabled accounts.
+- **Authentication errors**: Verify your Pacific Power credentials at [pacificpower.net](https://www.pacificpower.net/). MFA-enabled accounts are not supported.
+- **Browser launch errors**: Ensure Chromium is installed (`playwright install chromium`) and system dependencies are met (`playwright install-deps chromium`).
 - **No statistics appearing**: Check the Home Assistant logs for errors. Go to **Developer Tools** → **Statistics** and search for "pacific_power".
-- **Account details not found**: If auto-discovery fails, you'll be prompted to enter your account details manually. Find them in your browser's developer tools on the Pacific Power energy usage page.
 
 ## License
 

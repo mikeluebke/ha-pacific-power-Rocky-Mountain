@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import aiohttp
 from homeassistant.components.recorder.models import (
     StatisticData,
     StatisticMeanType,
@@ -20,7 +19,6 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -101,13 +99,8 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         )
 
     def _create_api(self) -> PacificPowerApi:
-        """Create a fresh API client with a new session."""
-        session = async_create_clientsession(
-            self.hass,
-            cookie_jar=aiohttp.CookieJar(unsafe=True),
-        )
+        """Create a fresh API client."""
         return PacificPowerApi(
-            session=session,
             username=self._entry.data[CONF_USERNAME],
             password=self._entry.data[CONF_PASSWORD],
         )
@@ -119,16 +112,18 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         self._api = self._create_api()
 
         try:
+            await self._api.async_start()
             await self._api.async_login()
+            last_data_ts = await self._fetch_and_insert_statistics()
         except PacificPowerAuthError as err:
             raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
         except PacificPowerConnectionError as err:
             raise UpdateFailed(f"Connection failed: {err}") from err
-
-        try:
-            last_data_ts = await self._fetch_and_insert_statistics()
         except PacificPowerApiError as err:
             raise UpdateFailed(f"Data fetch failed: {err}") from err
+        finally:
+            if self._api:
+                await self._api.async_stop()
 
         now = datetime.now(UTC)
         key = f"{self._account.customer_idn}_{self._account.account_sequence}"

@@ -21,20 +21,18 @@
           "password": "Your Pacific Power account password"
         }
       },
-      "select_account": {
-        "title": "Select Account",
-        "data": {
-          "account": "Service Address"
-        }
-      },
-      "manual_account": {
+      "account": {
         "title": "Account Details",
-        "description": "Account details could not be discovered automatically. You can find these values in your browser's developer tools on the Pacific Power energy usage page.",
+        "description": "Enter your Pacific Power account number and service address. Your account number is on your bill in the format XXXXXXXX-XXX.",
         "data": {
-          "customer_idn": "Customer ID Number",
-          "account_sequence": "Account Sequence",
+          "account_number": "Account Number",
           "agreement_sequence": "Agreement Sequence",
           "service_address": "Service Address"
+        },
+        "data_description": {
+          "account_number": "Your Pacific Power account number (e.g., 50916397-001)",
+          "agreement_sequence": "Usually 001 — only change if you have multiple meters",
+          "service_address": "Your service address as shown on your bill"
         }
       },
       "reauth_confirm": {
