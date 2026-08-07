@@ -53,6 +53,12 @@ After the first data fetch:
 - MFA must be disabled on the account
 - `cryptography` Python package (installed automatically)
 
+## Disclaimer
+
+This is an independent, community-developed project and is not affiliated with, endorsed by, or sponsored by Pacific Power, PacifiCorp, or Berkshire Hathaway Energy. "Pacific Power" and the Pacific Power logo are trademarks of PacifiCorp. Use of the name and logo is solely for identification purposes.
+
+This integration accesses Pacific Power's web portal using your own account credentials. Use it at your own risk. The authors are not responsible for any issues arising from its use, including but not limited to account access problems or terms of service violations.
+
 ## License
 
 MIT
