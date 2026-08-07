@@ -1,4 +1,4 @@
-"""Pacific Power Green Button integration for Home Assistant."""
+"""Pacific Power integration for Home Assistant."""
 
 from __future__ import annotations
 

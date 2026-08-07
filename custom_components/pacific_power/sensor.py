@@ -96,7 +96,7 @@ class PacificPowerSensor(
             identifiers={(DOMAIN, account_key)},
             name=f"Pacific Power {account_data.account.address}",
             manufacturer="Pacific Power",
-            model="Green Button",
+            model="Energy Usage",
             entry_type=DeviceEntryType.SERVICE,
         )
 
