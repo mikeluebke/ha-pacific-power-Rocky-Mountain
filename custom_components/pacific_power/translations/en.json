@@ -7,38 +7,31 @@
     "error": {
       "cannot_connect": "Unable to connect to Pacific Power. Please try again later.",
       "invalid_auth": "Invalid username or password.",
+      "no_accounts": "No accounts found for this login.",
       "unknown": "An unexpected error occurred."
     },
     "step": {
       "user": {
         "title": "Pacific Power Login",
         "data": {
-          "username": "Email",
+          "username": "Email / Username",
           "password": "Password"
         },
         "data_description": {
-          "username": "Your Pacific Power account email address",
+          "username": "Your Pacific Power account login",
           "password": "Your Pacific Power account password"
         }
       },
-      "account": {
-        "title": "Account Details",
-        "description": "Enter your Pacific Power account number and service address. Your account number is on your bill in the format XXXXXXXX-XXX.",
+      "select_account": {
+        "title": "Select Account",
         "data": {
-          "account_number": "Account Number",
-          "agreement_sequence": "Agreement Sequence",
-          "service_address": "Service Address"
-        },
-        "data_description": {
-          "account_number": "Your Pacific Power account number (e.g., 50916397-001)",
-          "agreement_sequence": "Usually 001 — only change if you have multiple meters",
-          "service_address": "Your service address as shown on your bill"
+          "account": "Account"
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate with Pacific Power",
         "data": {
-          "username": "Email",
+          "username": "Email / Username",
           "password": "Password"
         }
       }

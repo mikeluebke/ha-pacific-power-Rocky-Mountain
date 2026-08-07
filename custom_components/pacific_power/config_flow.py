@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 
 from .api import (
+    AccountInfo,
     PacificPowerApi,
     PacificPowerAuthError,
     PacificPowerConnectionError,
@@ -31,16 +32,6 @@ CREDENTIALS_SCHEMA = vol.Schema(
     }
 )
 
-CONF_ACCOUNT_NUMBER = "account_number"
-
-ACCOUNT_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_ACCOUNT_NUMBER): str,
-        vol.Required(CONF_AGREEMENT_SEQUENCE, default="001"): str,
-        vol.Required(CONF_SERVICE_ADDRESS): str,
-    }
-)
-
 
 class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Pacific Power."""
@@ -48,15 +39,14 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
-        """Initialize the config flow."""
         self._username: str = ""
         self._password: str = ""
-        self._accounts: list[dict[str, str]] = []
+        self._accounts: list[AccountInfo] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle the credentials step."""
+        """Handle credentials and account discovery."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -64,10 +54,13 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             self._password = user_input[CONF_PASSWORD]
 
             api = PacificPowerApi(self._username, self._password)
-
             try:
                 await api.async_start()
                 await api.async_login()
+                user = await api.async_get_user_info()
+                self._accounts = await api.async_get_accounts(
+                    user.get("webUserId", "")
+                )
             except PacificPowerAuthError:
                 errors["base"] = "invalid_auth"
             except PacificPowerConnectionError:
@@ -76,7 +69,11 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected error during login")
                 errors["base"] = "unknown"
             else:
-                return await self.async_step_account()
+                if len(self._accounts) == 1:
+                    return self._create_entry(self._accounts[0])
+                if len(self._accounts) > 1:
+                    return await self.async_step_select_account()
+                errors["base"] = "no_accounts"
             finally:
                 await api.async_stop()
 
@@ -86,59 +83,61 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_account(
+    async def async_step_select_account(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle account details entry."""
+        """Let the user pick which account to add."""
         if user_input is not None:
-            account_number = user_input[CONF_ACCOUNT_NUMBER].strip()
-            if "-" in account_number:
-                parts = account_number.split("-", 1)
-                customer_idn = parts[0]
-                account_seq = parts[1]
-            else:
-                customer_idn = account_number[:8]
-                account_seq = account_number[8:] or "001"
+            selected = user_input["account"]
+            for account in self._accounts:
+                label = f"{account.address} ({account.customer_idn}-{account.account_sequence})"
+                if label == selected:
+                    return self._create_entry(account)
 
-            unique_id = f"{customer_idn}_{account_seq}"
-            await self.async_set_unique_id(unique_id)
-            self._abort_if_unique_id_configured()
-
-            return self.async_create_entry(
-                title=f"Pacific Power ({user_input[CONF_SERVICE_ADDRESS]})",
-                data={
-                    CONF_USERNAME: self._username,
-                    CONF_PASSWORD: self._password,
-                    CONF_CUSTOMER_IDN: customer_idn,
-                    CONF_ACCOUNT_SEQUENCE: account_seq,
-                    CONF_AGREEMENT_SEQUENCE: user_input[CONF_AGREEMENT_SEQUENCE],
-                    CONF_SERVICE_ADDRESS: user_input[CONF_SERVICE_ADDRESS],
-                },
-            )
-
+        labels = [
+            f"{a.address} ({a.customer_idn}-{a.account_sequence})"
+            for a in self._accounts
+        ]
         return self.async_show_form(
-            step_id="account",
-            data_schema=ACCOUNT_SCHEMA,
+            step_id="select_account",
+            data_schema=vol.Schema(
+                {vol.Required("account"): vol.In(labels)}
+            ),
         )
+
+    def _create_entry(self, account: AccountInfo) -> ConfigFlowResult:
+        unique_id = f"{account.customer_idn}_{account.account_sequence}"
+        self._abort_if_unique_id_in_use(unique_id)
+        return self.async_create_entry(
+            title=f"Pacific Power ({account.address})",
+            data={
+                CONF_USERNAME: self._username,
+                CONF_PASSWORD: self._password,
+                CONF_CUSTOMER_IDN: account.customer_idn,
+                CONF_ACCOUNT_SEQUENCE: account.account_sequence,
+                CONF_AGREEMENT_SEQUENCE: account.agreement_sequence,
+                CONF_SERVICE_ADDRESS: account.address,
+            },
+        )
+
+    def _abort_if_unique_id_in_use(self, unique_id: str) -> None:
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if entry.unique_id == unique_id:
+                raise self.async_abort(reason="already_configured")
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
-        """Handle reauth when credentials expire."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle reauth credential entry."""
         errors: dict[str, str] = {}
-
         if user_input is not None:
             api = PacificPowerApi(
-                user_input[CONF_USERNAME],
-                user_input[CONF_PASSWORD],
+                user_input[CONF_USERNAME], user_input[CONF_PASSWORD]
             )
-
             try:
                 await api.async_start()
                 await api.async_login()
