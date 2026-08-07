@@ -139,21 +139,33 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             last_sum = 0.0
             last_ts = None
 
-        readings = await api.async_get_daily_usage(
-            self._account, start, now
-        )
-        if not readings:
+        all_readings: list[DailyUsage] = []
+        cursor = start.replace(day=1)
+        while cursor <= now:
+            month_end = (cursor.replace(day=28) + timedelta(days=4)).replace(
+                day=1
+            ) - timedelta(days=1)
+            if month_end > now:
+                month_end = now
+            readings = await api.async_get_daily_usage(
+                self._account, cursor, month_end
+            )
+            all_readings.extend(readings)
+            cursor = month_end + timedelta(days=1)
+
+        if not all_readings:
             _LOGGER.debug("No daily usage data returned")
             return None
 
         last_start_ts = last_ts.timestamp() if last_ts else 0.0
         new_readings = [
             r
-            for r in readings
+            for r in all_readings
             if datetime.strptime(r.date, "%Y-%m-%d")
             .replace(tzinfo=UTC)
             .timestamp()
             > last_start_ts
+            and r.kwh > 0
         ]
         if not new_readings:
             _LOGGER.debug("No new readings since last import")
