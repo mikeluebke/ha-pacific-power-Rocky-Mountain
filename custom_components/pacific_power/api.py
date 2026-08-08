@@ -53,6 +53,8 @@ class AccountInfo:
     account_sequence: str
     agreement_sequence: str
     address: str
+    site_idn: int = 0
+    service_sequence: int = 0
 
 
 @dataclass
@@ -60,6 +62,15 @@ class DailyUsage:
     """A single day's energy usage."""
 
     date: str
+    kwh: float
+
+
+@dataclass
+class HourlyUsage:
+    """A single hour's energy usage."""
+
+    date: str
+    time: str
     kwh: float
 
 
@@ -85,6 +96,7 @@ class PacificPowerApi:
         self._session: aiohttp.ClientSession | None = None
         self._sign_key: rsa.RSAPrivateKey | None = None
         self._aes_key: bytes | None = None
+        self._web_user_id: str | None = None
 
     async def async_start(self) -> None:
         """Create the HTTP session."""
@@ -162,13 +174,81 @@ class PacificPowerApi:
                                 ma.get("agreementSequence", "")
                             ),
                             address=addr,
+                            site_idn=ma.get("siteIDN", 0),
+                            service_sequence=ma.get("serviceSequence", 0),
                         )
                     )
         return accounts
 
+    async def async_is_ami_meter(self, account: AccountInfo) -> bool:
+        """Check if the account has an AMI smart meter (hourly data)."""
+        try:
+            data = await self._api_call(
+                "/api/energy-usage/getMeterType",
+                {
+                    "getMeterTypeRequestBody": {
+                        "agreement": {
+                            "customerIDN": account.customer_idn,
+                            "accountSequence": account.account_sequence,
+                            "agreementSequence": account.agreement_sequence,
+                        },
+                        "webUserid": self._web_user_id or "",
+                    }
+                },
+            )
+            return data.get("getMeterTypeResponseBody", {}).get(
+                "isAMIMeter", False
+            )
+        except PacificPowerApiError:
+            return False
+
+    async def async_get_hourly_usage(
+        self,
+        account: AccountInfo,
+        date: datetime,
+    ) -> list[HourlyUsage]:
+        """Fetch hourly energy usage for a single day."""
+        data = await self._api_call(
+            "/api/energy-usage/getIntervalUsageForDate",
+            {
+                "getIntervalUsageForDateRequestBody": {
+                    "request": {
+                        "siteIDN": account.site_idn,
+                        "registerType": "KWH",
+                        "serviceSequence": account.service_sequence,
+                        "readDate": date.strftime("%Y-%m-%d"),
+                        "agreement": {
+                            "customerIDN": account.customer_idn,
+                            "accountSequence": account.account_sequence,
+                            "agreementSequence": account.agreement_sequence,
+                        },
+                    }
+                }
+            },
+        )
+        resp = data.get("getIntervalUsageForDateResponseBody", {})
+        if not resp.get("intervalDataExists"):
+            return []
+        items = (
+            resp.get("response", {}).get("intervalDataResponse", [])
+            if resp.get("response")
+            else []
+        )
+        return [
+            HourlyUsage(
+                date=item["readDate"],
+                time=item["readTime"],
+                kwh=float(item.get("usage", 0)),
+            )
+            for item in items
+            if "readDate" in item and "readTime" in item
+        ]
+
     async def async_get_user_info(self) -> dict:
         """Get the logged-in user's profile."""
-        return await self._api_call("/api/user/me", None)
+        data = await self._api_call("/api/user/me", None)
+        self._web_user_id = data.get("webUserId")
+        return data
 
     async def async_get_daily_usage(
         self,

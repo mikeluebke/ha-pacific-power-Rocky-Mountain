@@ -28,6 +28,7 @@ from homeassistant.helpers.update_coordinator import (
 from .api import (
     AccountInfo,
     DailyUsage,
+    HourlyUsage,
     PacificPowerApi,
     PacificPowerApiError,
     PacificPowerAuthError,
@@ -49,7 +50,7 @@ INITIAL_HISTORY_DAYS = 365
 
 _STAT_ID_RE = re.compile(r"[^a-z0-9_]")
 
-type PacificPowerConfigEntry = ConfigEntry[PacificPowerCoordinator]
+PacificPowerConfigEntry = ConfigEntry["PacificPowerCoordinator"]
 
 
 @dataclass
@@ -71,7 +72,7 @@ def _make_stat_id(account: AccountInfo) -> str:
 
 
 class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]):
-    """Fetches daily energy data and inserts HA statistics."""
+    """Fetches energy data and inserts HA statistics."""
 
     config_entry: PacificPowerConfigEntry
 
@@ -99,9 +100,26 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             await api.async_login()
 
             user = await api.async_get_user_info()
-            await api.async_get_accounts(user.get("webUserId", ""))
+            accounts = await api.async_get_accounts(
+                user.get("webUserId", "")
+            )
 
-            last_data_ts = await self._fetch_and_insert(api)
+            for acct in accounts:
+                if (
+                    acct.customer_idn == self._account.customer_idn
+                    and acct.account_sequence == self._account.account_sequence
+                ):
+                    self._account.site_idn = acct.site_idn
+                    self._account.service_sequence = acct.service_sequence
+                    break
+
+            is_ami = await api.async_is_ami_meter(self._account)
+            _LOGGER.debug("AMI meter: %s", is_ami)
+
+            if is_ami and self._account.site_idn:
+                last_data_ts = await self._fetch_hourly(api)
+            else:
+                last_data_ts = await self._fetch_daily(api)
         except PacificPowerAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except PacificPowerConnectionError as err:
@@ -121,24 +139,71 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             )
         }
 
-    async def _fetch_and_insert(self, api: PacificPowerApi) -> datetime | None:
+    async def _fetch_hourly(self, api: PacificPowerApi) -> datetime | None:
+        """Fetch hour-by-hour data for AMI meters."""
         stat_id = _make_stat_id(self._account)
-
-        last_stats = await self.hass.async_add_executor_job(
-            get_last_statistics, self.hass, 1, stat_id, False, {"sum", "start"}
-        )
+        last_sum, start, last_ts = await self._get_last_stat(stat_id)
 
         now = datetime.now(UTC)
-        if last_stats and stat_id in last_stats:
-            last_stat = last_stats[stat_id][0]
-            last_ts = datetime.fromtimestamp(last_stat["start"], tz=UTC)
-            start = last_ts - timedelta(days=OVERLAP_DAYS)
-            last_sum = last_stat.get("sum", 0.0) or 0.0
-        else:
-            start = now - timedelta(days=INITIAL_HISTORY_DAYS)
-            last_sum = 0.0
-            last_ts = None
+        cursor = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        all_readings: list[HourlyUsage] = []
 
+        while cursor.date() <= now.date():
+            try:
+                readings = await api.async_get_hourly_usage(
+                    self._account, cursor
+                )
+                all_readings.extend(readings)
+            except PacificPowerApiError:
+                _LOGGER.debug("No hourly data for %s", cursor.date())
+            cursor += timedelta(days=1)
+
+        if not all_readings:
+            _LOGGER.debug("No hourly usage data returned")
+            return None
+
+        last_start_ts = last_ts.timestamp() if last_ts else 0.0
+        metadata = self._make_metadata(stat_id)
+
+        running_sum = last_sum
+        statistics: list[StatisticData] = []
+        latest_dt: datetime | None = None
+
+        for reading in all_readings:
+            if reading.kwh <= 0:
+                continue
+            hour = int(reading.time.split(":")[0])
+            start_dt = datetime.strptime(reading.date, "%Y-%m-%d").replace(
+                hour=hour, tzinfo=UTC
+            )
+            if start_dt.timestamp() <= last_start_ts:
+                continue
+            running_sum += reading.kwh
+            statistics.append(
+                StatisticData(
+                    start=start_dt,
+                    state=reading.kwh,
+                    sum=running_sum,
+                )
+            )
+            latest_dt = start_dt
+
+        if statistics:
+            async_add_external_statistics(self.hass, metadata, statistics)
+            _LOGGER.debug(
+                "Inserted %d hourly statistics for %s",
+                len(statistics),
+                stat_id,
+            )
+
+        return latest_dt
+
+    async def _fetch_daily(self, api: PacificPowerApi) -> datetime | None:
+        """Fetch day-by-day data for non-AMI meters."""
+        stat_id = _make_stat_id(self._account)
+        last_sum, start, last_ts = await self._get_last_stat(stat_id)
+
+        now = datetime.now(UTC)
         all_readings: list[DailyUsage] = []
         cursor = start.replace(day=1)
         while cursor <= now:
@@ -158,35 +223,20 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             return None
 
         last_start_ts = last_ts.timestamp() if last_ts else 0.0
-        new_readings = [
-            r
-            for r in all_readings
-            if datetime.strptime(r.date, "%Y-%m-%d")
-            .replace(tzinfo=UTC)
-            .timestamp()
-            > last_start_ts
-            and r.kwh > 0
-        ]
-        if not new_readings:
-            _LOGGER.debug("No new readings since last import")
-            return None
-
-        metadata = StatisticMetaData(
-            mean_type=StatisticMeanType.NONE,
-            has_sum=True,
-            name=f"Pacific Power {self._account.address}",
-            source=DOMAIN,
-            statistic_id=stat_id,
-            unit_class="energy",
-            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        )
+        metadata = self._make_metadata(stat_id)
 
         running_sum = last_sum
         statistics: list[StatisticData] = []
-        for reading in new_readings:
+        latest_dt: datetime | None = None
+
+        for reading in all_readings:
+            if reading.kwh <= 0:
+                continue
             start_dt = datetime.strptime(reading.date, "%Y-%m-%d").replace(
                 tzinfo=UTC
             )
+            if start_dt.timestamp() <= last_start_ts:
+                continue
             running_sum += reading.kwh
             statistics.append(
                 StatisticData(
@@ -195,11 +245,43 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
                     sum=running_sum,
                 )
             )
+            latest_dt = start_dt
 
-        async_add_external_statistics(self.hass, metadata, statistics)
-        _LOGGER.debug("Inserted %d statistics for %s", len(statistics), stat_id)
+        if statistics:
+            async_add_external_statistics(self.hass, metadata, statistics)
+            _LOGGER.debug(
+                "Inserted %d daily statistics for %s",
+                len(statistics),
+                stat_id,
+            )
 
-        last_reading = new_readings[-1]
-        return datetime.strptime(last_reading.date, "%Y-%m-%d").replace(
-            tzinfo=UTC
+        return latest_dt
+
+    async def _get_last_stat(
+        self, stat_id: str
+    ) -> tuple[float, datetime, datetime | None]:
+        """Get the last statistic sum and timestamp."""
+        last_stats = await self.hass.async_add_executor_job(
+            get_last_statistics, self.hass, 1, stat_id, False, {"sum", "start"}
+        )
+
+        now = datetime.now(UTC)
+        if last_stats and stat_id in last_stats:
+            last_stat = last_stats[stat_id][0]
+            last_ts = datetime.fromtimestamp(last_stat["start"], tz=UTC)
+            start = last_ts - timedelta(days=OVERLAP_DAYS)
+            last_sum = last_stat.get("sum", 0.0) or 0.0
+            return last_sum, start, last_ts
+
+        return 0.0, now - timedelta(days=INITIAL_HISTORY_DAYS), None
+
+    def _make_metadata(self, stat_id: str) -> StatisticMetaData:
+        return StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"Pacific Power {self._account.address}",
+            source=DOMAIN,
+            statistic_id=stat_id,
+            unit_class="energy",
+            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         )
