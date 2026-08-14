@@ -20,6 +20,7 @@ from .const import (
     CONF_AGREEMENT_SEQUENCE,
     CONF_CUSTOMER_IDN,
     CONF_SERVICE_ADDRESS,
+    CONF_TIMEZONE,
     DOMAIN,
 )
 
@@ -70,7 +71,7 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             else:
                 if len(self._accounts) == 1:
-                    return self._create_entry(self._accounts[0])
+                    return await self._create_entry(self._accounts[0])
                 if len(self._accounts) > 1:
                     return await self.async_step_select_account()
                 errors["base"] = "no_accounts"
@@ -92,7 +93,7 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             for account in self._accounts:
                 label = f"{account.address} ({account.customer_idn}-{account.account_sequence})"
                 if label == selected:
-                    return self._create_entry(account)
+                    return await self._create_entry(account)
 
         labels = [
             f"{a.address} ({a.customer_idn}-{a.account_sequence})"
@@ -105,9 +106,10 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    def _create_entry(self, account: AccountInfo) -> ConfigFlowResult:
+    async def _create_entry(self, account: AccountInfo) -> ConfigFlowResult:
         unique_id = f"{account.customer_idn}_{account.account_sequence}"
-        self._abort_if_unique_id_in_use(unique_id)
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
         return self.async_create_entry(
             title=f"Pacific Power ({account.address})",
             data={
@@ -117,13 +119,9 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_ACCOUNT_SEQUENCE: account.account_sequence,
                 CONF_AGREEMENT_SEQUENCE: account.agreement_sequence,
                 CONF_SERVICE_ADDRESS: account.address,
+                CONF_TIMEZONE: self.hass.config.time_zone,
             },
         )
-
-    def _abort_if_unique_id_in_use(self, unique_id: str) -> None:
-        for entry in self.hass.config_entries.async_entries(DOMAIN):
-            if entry.unique_id == unique_id:
-                raise self.async_abort(reason="already_configured")
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
@@ -141,6 +139,10 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 await api.async_start()
                 await api.async_login()
+                user = await api.async_get_user_info()
+                accounts = await api.async_get_accounts(
+                    user.get("webUserId", "")
+                )
             except PacificPowerAuthError:
                 errors["base"] = "invalid_auth"
             except PacificPowerConnectionError:
@@ -153,16 +155,25 @@ class PacificPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                     self.context["entry_id"]
                 )
                 if entry:
-                    self.hass.config_entries.async_update_entry(
-                        entry,
-                        data={
-                            **entry.data,
-                            CONF_USERNAME: user_input[CONF_USERNAME],
-                            CONF_PASSWORD: user_input[CONF_PASSWORD],
-                        },
+                    configured_idn = entry.data.get(CONF_CUSTOMER_IDN)
+                    has_access = any(
+                        a.customer_idn == configured_idn for a in accounts
                     )
-                    await self.hass.config_entries.async_reload(entry.entry_id)
-                    return self.async_abort(reason="reauth_successful")
+                    if not has_access:
+                        errors["base"] = "invalid_auth"
+                    else:
+                        self.hass.config_entries.async_update_entry(
+                            entry,
+                            data={
+                                **entry.data,
+                                CONF_USERNAME: user_input[CONF_USERNAME],
+                                CONF_PASSWORD: user_input[CONF_PASSWORD],
+                            },
+                        )
+                        await self.hass.config_entries.async_reload(
+                            entry.entry_id
+                        )
+                        return self.async_abort(reason="reauth_successful")
             finally:
                 await api.async_stop()
 

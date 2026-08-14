@@ -57,18 +57,21 @@ async def async_setup_entry(
 ) -> None:
     """Set up Pacific Power sensors."""
     coordinator = entry.runtime_data
+    data = coordinator.data
+    account_key = (
+        f"{data.account.customer_idn}_{data.account.account_sequence}"
+    )
 
     entities: list[PacificPowerSensor] = []
-    for account_key, account_data in coordinator.data.items():
-        for description in SENSOR_DESCRIPTIONS:
-            entities.append(
-                PacificPowerSensor(
-                    coordinator=coordinator,
-                    description=description,
-                    account_key=account_key,
-                    account_data=account_data,
-                )
+    for description in SENSOR_DESCRIPTIONS:
+        entities.append(
+            PacificPowerSensor(
+                coordinator=coordinator,
+                description=description,
+                account_key=account_key,
+                account_data=data,
             )
+        )
 
     async_add_entities(entities)
 
@@ -103,8 +106,6 @@ class PacificPowerSensor(
     @property
     def native_value(self) -> datetime | None:
         """Return the sensor value."""
-        if self.coordinator.data and self._account_key in self.coordinator.data:
-            return self.entity_description.value_fn(
-                self.coordinator.data[self._account_key]
-            )
+        if self.coordinator.data:
+            return self.entity_description.value_fn(self.coordinator.data)
         return None

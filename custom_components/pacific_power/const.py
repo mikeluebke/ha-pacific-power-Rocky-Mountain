@@ -6,6 +6,7 @@ CONF_CUSTOMER_IDN = "customer_idn"
 CONF_ACCOUNT_SEQUENCE = "account_sequence"
 CONF_AGREEMENT_SEQUENCE = "agreement_sequence"
 CONF_SERVICE_ADDRESS = "service_address"
+CONF_TIMEZONE = "timezone"
 
 BASE_URL = "https://csapps.pacificpower.net"
 B2C_LOGIN_URL = "https://login.csapps.pacificpower.net"

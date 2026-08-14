@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -39,6 +40,7 @@ from .const import (
     CONF_AGREEMENT_SEQUENCE,
     CONF_CUSTOMER_IDN,
     CONF_SERVICE_ADDRESS,
+    CONF_TIMEZONE,
     DOMAIN,
 )
 
@@ -47,7 +49,7 @@ _LOGGER = logging.getLogger(__name__)
 UPDATE_INTERVAL = timedelta(hours=12)
 OVERLAP_DAYS_DAILY = 30
 OVERLAP_DAYS_HOURLY = 3
-INITIAL_HISTORY_DAYS = 365
+INITIAL_HISTORY_DAYS = 30
 
 _STAT_ID_RE = re.compile(r"[^a-z0-9_]")
 
@@ -72,7 +74,7 @@ def _make_stat_id(account: AccountInfo) -> str:
     return f"{DOMAIN}:{slug}_energy_consumption"
 
 
-class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]):
+class PacificPowerCoordinator(DataUpdateCoordinator[PacificPowerData]):
     """Fetches energy data and inserts HA statistics."""
 
     config_entry: PacificPowerConfigEntry
@@ -90,9 +92,7 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             address=entry.data[CONF_SERVICE_ADDRESS],
         )
 
-    async def _async_update_data(
-        self,
-    ) -> dict[str, PacificPowerData]:
+    async def _async_update_data(self) -> PacificPowerData:
         api = PacificPowerApi(
             username=self._entry.data[CONF_USERNAME],
             password=self._entry.data[CONF_PASSWORD],
@@ -134,14 +134,11 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         if new_data_ts:
             self._last_data_received = new_data_ts
         now = datetime.now(UTC)
-        key = f"{self._account.customer_idn}_{self._account.account_sequence}"
-        return {
-            key: PacificPowerData(
-                account=self._account,
-                last_data_received=self._last_data_received,
-                last_updated=now,
-            )
-        }
+        return PacificPowerData(
+            account=self._account,
+            last_data_received=self._last_data_received,
+            last_updated=now,
+        )
 
     async def _fetch_hourly(self, api: PacificPowerApi) -> datetime | None:
         """Fetch hour-by-hour data for AMI meters."""
@@ -150,6 +147,9 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             stat_id, OVERLAP_DAYS_HOURLY
         )
 
+        tz = ZoneInfo(
+            self._entry.data.get(CONF_TIMEZONE, self.hass.config.time_zone)
+        )
         now = datetime.now(UTC)
         cursor = start.replace(hour=0, minute=0, second=0, microsecond=0)
         all_readings: list[HourlyUsage] = []
@@ -168,7 +168,6 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             _LOGGER.debug("No hourly usage data returned")
             return None
 
-        last_start_ts = last_ts.timestamp() if last_ts else 0.0
         metadata = self._make_metadata(stat_id)
 
         running_sum = last_sum
@@ -176,14 +175,12 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         latest_dt: datetime | None = None
 
         for reading in all_readings:
-            if reading.kwh <= 0:
+            if reading.kwh < 0:
                 continue
             hour = int(reading.time.split(":")[0])
             start_dt = datetime.strptime(reading.date, "%Y-%m-%d").replace(
-                tzinfo=UTC
+                tzinfo=tz
             ) + timedelta(hours=hour)
-            if start_dt.timestamp() <= last_start_ts:
-                continue
             running_sum += reading.kwh
             statistics.append(
                 StatisticData(
@@ -192,7 +189,8 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
                     sum=running_sum,
                 )
             )
-            latest_dt = start_dt
+            if latest_dt is None or start_dt > latest_dt:
+                latest_dt = start_dt
 
         if statistics:
             async_add_external_statistics(self.hass, metadata, statistics)
@@ -209,6 +207,9 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         stat_id = _make_stat_id(self._account)
         last_sum, start, last_ts = await self._get_last_stat(stat_id)
 
+        tz = ZoneInfo(
+            self._entry.data.get(CONF_TIMEZONE, self.hass.config.time_zone)
+        )
         now = datetime.now(UTC)
         all_readings: list[DailyUsage] = []
         cursor = start.replace(day=1)
@@ -228,7 +229,6 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             _LOGGER.debug("No daily usage data returned")
             return None
 
-        last_start_ts = last_ts.timestamp() if last_ts else 0.0
         metadata = self._make_metadata(stat_id)
 
         running_sum = last_sum
@@ -236,13 +236,11 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         latest_dt: datetime | None = None
 
         for reading in all_readings:
-            if reading.kwh <= 0:
+            if reading.kwh < 0:
                 continue
             start_dt = datetime.strptime(reading.date, "%Y-%m-%d").replace(
-                tzinfo=UTC
+                tzinfo=tz
             )
-            if start_dt.timestamp() <= last_start_ts:
-                continue
             running_sum += reading.kwh
             statistics.append(
                 StatisticData(
@@ -251,7 +249,8 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
                     sum=running_sum,
                 )
             )
-            latest_dt = start_dt
+            if latest_dt is None or start_dt > latest_dt:
+                latest_dt = start_dt
 
         if statistics:
             async_add_external_statistics(self.hass, metadata, statistics)

@@ -8,6 +8,7 @@ protocol the portal's Angular app uses.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -141,6 +142,8 @@ class PacificPowerApi:
             .get("accountList", {})
             .get("webAccount", [])
         )
+        if isinstance(web_accounts, dict):
+            web_accounts = [web_accounts]
 
         accounts: list[AccountInfo] = []
         for wa in web_accounts:
@@ -160,11 +163,14 @@ class PacificPowerApi:
                     }
                 },
             )
-            for ma in (
+            metered_agreements = (
                 ma_resp.get("getMeteredAgreementsResponseBody", {})
                 .get("meteredAgreementList", {})
                 .get("meteredAgreement", [])
-            ):
+            )
+            if isinstance(metered_agreements, dict):
+                metered_agreements = [metered_agreements]
+            for ma in metered_agreements:
                 if ma.get("agreementStatus") == "Active":
                     accounts.append(
                         AccountInfo(
@@ -300,11 +306,11 @@ class PacificPowerApi:
             _collect_cookies(resp, self._cookies)
 
     async def _handshake(self) -> None:
-        self._sign_key = rsa.generate_private_key(
-            public_exponent=65537, key_size=4096
+        self._sign_key = await asyncio.to_thread(
+            rsa.generate_private_key, public_exponent=65537, key_size=4096
         )
-        enc_key = rsa.generate_private_key(
-            public_exponent=65537, key_size=4096
+        enc_key = await asyncio.to_thread(
+            rsa.generate_private_key, public_exponent=65537, key_size=4096
         )
         sign_pub = base64.b64encode(
             self._sign_key.public_key().public_bytes(
@@ -347,7 +353,7 @@ class PacificPowerApi:
 
     async def _b2c_login(self) -> None:
         url = f"{BASE_URL}/oauth2/authorization/B2C_1A_PAC_SIGNIN"
-        while True:
+        for _ in range(10):
             async with self._session.get(
                 url,
                 allow_redirects=False,
@@ -363,6 +369,8 @@ class PacificPowerApi:
                 html = await resp.text()
                 final_url = str(resp.url)
                 break
+        else:
+            raise PacificPowerConnectionError("Too many redirects")
 
         match = _SETTINGS_RE.search(html)
         if not match:
@@ -413,7 +421,7 @@ class PacificPowerApi:
             f"/api/CombinedSigninAndSignup/confirmed"
             f"?csrf_token={csrf}&tx={trans_id}&p={policy}"
         )
-        while True:
+        for _ in range(10):
             async with self._session.get(
                 confirm_url,
                 allow_redirects=False,
@@ -427,6 +435,8 @@ class PacificPowerApi:
                         confirm_url = urljoin(str(resp.url), confirm_url)
                     continue
                 break
+        else:
+            raise PacificPowerConnectionError("Too many redirects")
 
     # -- Internal: encrypted API calls --
 
@@ -471,9 +481,12 @@ class PacificPowerApi:
             if resp.status == 403:
                 raise PacificPowerApiError(f"Access denied: {path}")
             if resp.status == 400 and text:
-                msg = json.loads(text).get("fault", {}).get(
-                    "faultmessage", text[:200]
-                )
+                try:
+                    msg = json.loads(text).get("fault", {}).get(
+                        "faultmessage", text[:200]
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    msg = text[:200]
                 raise PacificPowerApiError(f"API error: {msg}")
             if resp.status != 200:
                 raise PacificPowerApiError(f"{path}: HTTP {resp.status}")
@@ -487,7 +500,12 @@ class PacificPowerApi:
                     .decode("utf-8")
                 )
             except Exception:
-                return json.loads(text)
+                try:
+                    return json.loads(text)
+                except (json.JSONDecodeError, ValueError) as err:
+                    raise PacificPowerApiError(
+                        f"Unexpected response from {path}: {text[:200]}"
+                    ) from err
 
     def _cookie_str(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self._cookies.items())
