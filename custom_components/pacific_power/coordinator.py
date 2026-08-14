@@ -45,7 +45,8 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 UPDATE_INTERVAL = timedelta(hours=12)
-OVERLAP_DAYS = 30
+OVERLAP_DAYS_DAILY = 30
+OVERLAP_DAYS_HOURLY = 3
 INITIAL_HISTORY_DAYS = 365
 
 _STAT_ID_RE = re.compile(r"[^a-z0-9_]")
@@ -81,6 +82,7 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             hass, _LOGGER, name=DOMAIN, update_interval=UPDATE_INTERVAL
         )
         self._entry = entry
+        self._last_data_received: datetime | None = None
         self._account = AccountInfo(
             customer_idn=entry.data[CONF_CUSTOMER_IDN],
             account_sequence=entry.data[CONF_ACCOUNT_SEQUENCE],
@@ -117,9 +119,9 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
             _LOGGER.debug("AMI meter: %s", is_ami)
 
             if is_ami and self._account.site_idn:
-                last_data_ts = await self._fetch_hourly(api)
+                new_data_ts = await self._fetch_hourly(api)
             else:
-                last_data_ts = await self._fetch_daily(api)
+                new_data_ts = await self._fetch_daily(api)
         except PacificPowerAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except PacificPowerConnectionError as err:
@@ -129,12 +131,14 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         finally:
             await api.async_stop()
 
+        if new_data_ts:
+            self._last_data_received = new_data_ts
         now = datetime.now(UTC)
         key = f"{self._account.customer_idn}_{self._account.account_sequence}"
         return {
             key: PacificPowerData(
                 account=self._account,
-                last_data_received=last_data_ts,
+                last_data_received=self._last_data_received,
                 last_updated=now,
             )
         }
@@ -142,7 +146,9 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
     async def _fetch_hourly(self, api: PacificPowerApi) -> datetime | None:
         """Fetch hour-by-hour data for AMI meters."""
         stat_id = _make_stat_id(self._account)
-        last_sum, start, last_ts = await self._get_last_stat(stat_id)
+        last_sum, start, last_ts = await self._get_last_stat(
+            stat_id, OVERLAP_DAYS_HOURLY
+        )
 
         now = datetime.now(UTC)
         cursor = start.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -258,7 +264,7 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         return latest_dt
 
     async def _get_last_stat(
-        self, stat_id: str
+        self, stat_id: str, overlap_days: int = OVERLAP_DAYS_DAILY
     ) -> tuple[float, datetime, datetime | None]:
         """Get the last statistic sum and timestamp."""
         last_stats = await self.hass.async_add_executor_job(
@@ -269,7 +275,7 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
         if last_stats and stat_id in last_stats:
             last_stat = last_stats[stat_id][0]
             last_ts = datetime.fromtimestamp(last_stat["start"], tz=UTC)
-            start = last_ts - timedelta(days=OVERLAP_DAYS)
+            start = last_ts - timedelta(days=overlap_days)
             last_sum = last_stat.get("sum", 0.0) or 0.0
             return last_sum, start, last_ts
 
