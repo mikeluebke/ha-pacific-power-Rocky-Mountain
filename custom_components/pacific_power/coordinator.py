@@ -174,8 +174,8 @@ class PacificPowerCoordinator(DataUpdateCoordinator[dict[str, PacificPowerData]]
                 continue
             hour = int(reading.time.split(":")[0])
             start_dt = datetime.strptime(reading.date, "%Y-%m-%d").replace(
-                hour=hour, tzinfo=UTC
-            )
+                tzinfo=UTC
+            ) + timedelta(hours=hour)
             if start_dt.timestamp() <= last_start_ts:
                 continue
             running_sum += reading.kwh
