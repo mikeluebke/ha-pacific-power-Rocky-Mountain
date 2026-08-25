@@ -168,13 +168,20 @@ class PacificPowerCoordinator(DataUpdateCoordinator[PacificPowerData]):
             _LOGGER.debug("No hourly usage data returned")
             return None
 
+        deduped: dict[tuple[str, str], HourlyUsage] = {}
+        for reading in all_readings:
+            deduped[(reading.date, reading.time)] = reading
+
         metadata = self._make_metadata(stat_id)
 
         running_sum = last_sum
         statistics: list[StatisticData] = []
         latest_dt: datetime | None = None
 
-        for reading in all_readings:
+        for reading in sorted(
+            deduped.values(),
+            key=lambda r: (r.date, int(r.time.split(":")[0])),
+        ):
             if reading.kwh < 0:
                 continue
             hour = int(reading.time.split(":")[0])
